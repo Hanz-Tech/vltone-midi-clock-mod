@@ -1,11 +1,4 @@
 
-//Chip Audette
-//May 1, 2013
-//Assumes use of MIDI Shield from Sparkfun
-//  -- Instead of pots, has dangling 1/8 jacks wired in.
-//Input is MIDI signal with the MIDI pulse
-//Output is HIGH/LOW signal on A0/A2 (pulse high) and A1/A3 (pulse low)
-//Output is 1/16th note on A0/A1, 1/8th note on A2/A3
 //Output is also an echo of all incoming MIDI traffice to the Serial Out (ie, MIDI out)
 //https://synthhacker.blogspot.com/2014/02/arpeggiator-fun-my-midi-to-trigger.html
 
@@ -21,9 +14,10 @@ typedef unsigned long millis_t;
 MIDI_CREATE_INSTANCE(HardwareSerial, Serial1, MIDIserial); 
 
 #define MIDI_CLOCK_LED  6
-#define TRIGGER_OUT_LED 13
+#define TRIGGER_OUT_LED 12
 #define ANALOG_UPDATE_MILLIS 200 
-
+#define OUTPUT_PIN_1   7
+#define OUTPUT_PIN_2   8
 //define analog input pins for reading the analog inputs
 #define N_INPUTS (1)
 int inputPin[] = {A0};
@@ -42,8 +36,10 @@ micros_t pulseTimeout_micros = 2000000UL;
 #define N_OUTPUTS (1)   //how many outputs are attached
 #define N_COUNTERS (N_OUTPUTS)  //the extra counter is for the LED
 int pulseCountsPerOutput[N_COUNTERS]; //how many midi pulses before issuing a trigger command
+int previous_pulseCountsPerOutput[N_COUNTERS];
 int pulse_counter[N_COUNTERS];
-int outputPin_high[] = {D4};
+int outputPin_high[] = {OUTPUT_PIN_1};
+bool outputPin_state[] = {false,false};
 bool isStarted = false;
 
  //update analog inputs after this period of milliseconds
@@ -58,11 +54,13 @@ void turnOffStatLight(int pin) {
 void activateTrigger(int pinToHigh, int LEDpin) {
     if(isStarted){
       digitalWrite(pinToHigh,HIGH);
+      // Serial.println("high");
       if (LEDpin > 0) turnOnStatLight(LEDpin);
     }
 }
 void deactivateTrigger(int pinToLow, int LEDpin) {
     digitalWrite(pinToLow,LOW);
+    // Serial.println("low");
     if (LEDpin > 0) turnOffStatLight(LEDpin);
 }
 void setup() {
@@ -96,7 +94,14 @@ void setup() {
   resetCounters();
   
   //start serial with midi baudrate 31250
-  Serial.begin(11520);     
+  Serial.begin(11520);
+  turnOnStatLight(TRIGGER_OUT_LED);
+  delay(250);
+  turnOffStatLight(TRIGGER_OUT_LED);
+  delay(250);
+  turnOnStatLight(TRIGGER_OUT_LED);
+  delay(250);
+  turnOffStatLight(TRIGGER_OUT_LED);
 }
 
 void loop () {
@@ -108,11 +113,6 @@ void loop () {
   static millis_t lastAnalogInputs_millis=0;
   static unsigned long loopCount=0;
  
-   //service interrupts
-  //  if (flag_middlePushbutton) {
-  //    resetCounters();
-  //    flag_middlePushbutton=false;
-  //  }
      
   //check some time-based things
   loopCount++;
@@ -138,36 +138,27 @@ void loop () {
         //read analog input and decide what the MIDI clock divider should be
         int val = analogRead(inputPin[I]);
         pulseCountsPerOutput[I] = convertAnalogReadToPulseDivider(val);
+        if(pulseCountsPerOutput[I] != previous_pulseCountsPerOutput[I]){
+          resetCounters();
+          previous_pulseCountsPerOutput[I] = pulseCountsPerOutput[I];
+        }
 
         // Serial.print("pulseCounterPerOutput ");Serial.print(I);Serial.print(": ");
         // Serial.print(val); Serial.print(", ");
         // Serial.println(pulseCountsPerOutput[I]);
       }
-      
-      //check the pushbuttons
-  //     for (int I=0;I<N_PUSHBUTTONS;I++) {
-  //       if (I != 1) { //don't service the middle pushbutton because it's on an interrupt
-  //         int val = digitalRead(pushbuttonPin[I]);
-  //         switch (I) {
-  //           case 0:
-  //             if ((val==HIGH) && (prevPushbuttonState[I]==LOW)) stepCountersBack();
-  //             break;
-  // //          case 1:
-  // //            if ((val==HIGH) && (prevPushbuttonState[I]==LOW)) resetCounters();
-  // //            break;
-  //           case 2:
-  //             if ((val==HIGH) && (prevPushbuttonState[I]==LOW)) stepCountersBack();
-  //             break;          
-  //         }
-  //         prevPushbuttonState[I] = val;
-  //       }
-  //     }
     }
   }
 
   //Are there any MIDI messages
   if (MIDIserial.read()){                // Is there a MIDI message incoming ?
-    switch(MIDIserial.getType()){      // Get the type of the message we caught
+    byte type = MIDIserial.getType();
+    byte channel = MIDIserial.getChannel();
+    byte data1 = MIDIserial.getData1();
+    byte data2 = MIDIserial.getData2();
+    midi::MidiType mtype = (midi::MidiType)type;
+    MIDIserial.send(mtype, data1, data2, channel);
+    switch(mtype){      // Get the type of the message we caught
       case midi::Clock:  //MIDI Clock Pulse
         //maybe a lot of time has passed because the cable was unplugged.
         //if so, ...check to see if enough time has passed to reset the counter
@@ -175,7 +166,7 @@ void loop () {
         if (currentTime_micros < lastMessageReceived_micros) lastMessageReceived_micros = 0; //it wrapped around, simplistic reset
         if ((currentTime_micros - lastMessageReceived_micros) > pulseTimeout_micros) {
           resetCounters(); //reset the counters!
-          Serial.println("timeout");
+          // Serial.println("timeout");
         } 
         lastMessageReceived_micros = currentTime_micros;
       
@@ -194,20 +185,25 @@ void loop () {
           //act upon the counter
           if (pulse_counter[Icounter] == 0) {
             activateTrigger(outputPin_high[Icounter],TRIGGER_OUT_LED);
+            outputPin_state[Icounter] = true;
+            // Serial.println("on");
           } else if (pulse_counter[Icounter] >= min(pulseCountsPerOutput[Icounter]/2,MIDI_PPQN/2)) {
-            deactivateTrigger(outputPin_high[Icounter],TRIGGER_OUT_LED);
+            if(outputPin_state[Icounter]){
+              deactivateTrigger(outputPin_high[Icounter],TRIGGER_OUT_LED);
+              outputPin_state[Icounter] = false;
+            }
           }
         }
         break;
       case midi::Start:  //MIDI Clock Start
         //restart the counter
-        Serial.println("start");
+        // Serial.println("start");
         isStarted = true;
         break;
       case midi::Stop:
         isStarted = false;
         resetCounters();
-        Serial.println("stop");
+        // Serial.println("stop");
 
     }
     
@@ -227,7 +223,7 @@ void loop () {
 
 void resetCounters(void) {
   for (int I=0;I<N_COUNTERS;I++) {
-    Serial.println("reset");
+    // Serial.println("reset");
     //set so that the next one will be zero
     pulse_counter[I]=-1;  
     //deactivate the Trigger so that it is ready to activate on the next MIDI pulse
@@ -242,12 +238,8 @@ void stepCountersBack(void) {
   }
 }
 #define MAX_ANALOG_READ_COUNTS 1023
-//#define N_PULSE_OPTIONS 12
-//static int choices_pulsesDivider[] = {3,    4,     6,     8,   12,    16,   24,    32,      48,    96,   144,   192};
-//#define N_PULSE_OPTIONS 12
-//static int choices_pulsesDivider[] =  {3,            6,     8,    12,   16,   24,    32,      48,    72,    96,    144,   192};  //assumed 24 PPQN
-#define N_PULSE_OPTIONS 12
-static int choices_pulsesDivider[] =  {3,            6,     8,    12,   16,   24,        36,  48,    72,    96,    144,   192};//assumed 24 PPQN
+#define N_PULSE_OPTIONS 10
+static int choices_pulsesDivider[] =  { 3,6,8,12,   16,   24,        36,  48,    72,96 };//assumed 24 PPQN
 int convertAnalogReadToPulseDivider(int analogVal) {
   static int COUNTS_PER_INDEX = MAX_ANALOG_READ_COUNTS / N_PULSE_OPTIONS;
   int index = analogVal / COUNTS_PER_INDEX;  //rounds down
